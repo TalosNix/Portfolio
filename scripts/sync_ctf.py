@@ -30,8 +30,12 @@ import urllib.error
 OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "ctf-machines.json")
 
 HEADERS_COMMON = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) talos-portfolio-sync/1.0"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
 }
+
+RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
+MAX_RETRIES = 5
 
 # HTB numeric difficulty -> etiqueta legible (aprox. según la escala pública de HTB)
 HTB_DIFFICULTY_MAP = [
@@ -44,8 +48,22 @@ HTB_DIFFICULTY_MAP = [
 
 def http_get_json(url, headers=None, timeout=20):
     req = urllib.request.Request(url, headers={**HEADERS_COMMON, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            last_error = e
+            if e.code in RETRY_STATUS_CODES and attempt < MAX_RETRIES:
+                # Respeta Retry-After si el servidor lo manda; si no, backoff exponencial.
+                wait = e.headers.get("Retry-After")
+                wait = float(wait) if wait and wait.isdigit() else (2 ** attempt)
+                print(f"  ({url.split('?')[0]}) HTTP {e.code}, reintento {attempt}/{MAX_RETRIES} en {wait:.0f}s...", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            raise
+    raise last_error
 
 
 def find_items_recursive(obj, required_keys):
@@ -127,9 +145,9 @@ def sync_thm():
     seen = set()
     page = 1
     while True:
-        url = f"https://tryhackme.com/api/v2/public-profile/completed-rooms?username={username}&limit=50&page={page}"
+        url = f"https://tryhackme.com/api/v2/public-profile/completed-rooms?username={username}&limit=25&page={page}"
         try:
-            data = http_get_json(url)
+            data = http_get_json(url, headers={"Referer": f"https://tryhackme.com/p/{username}"})
         except Exception as e:
             print(f"[THM] ERROR en página {page}: {e}", file=sys.stderr)
             break
@@ -148,11 +166,11 @@ def sync_thm():
             seen.add(title)
             rooms.append({"nombre": title, "dificultad": ""})
 
-        # Si la página trajo menos de 50, asumimos que es la última.
-        if len(raw_items) < 50:
+        # Si la página trajo menos de 25, asumimos que es la última.
+        if len(raw_items) < 25:
             break
         page += 1
-        time.sleep(0.5)
+        time.sleep(2)
         if page > 20:  # límite de seguridad, evita bucles infinitos
             break
 
